@@ -30,7 +30,7 @@ import filodb.core.binaryrecord2.RecordBuilder
 import filodb.core.metadata.Dataset
 import filodb.gateway.conversion._
 import filodb.memory.MemFactory
-import filodb.timeseries.TestTimeseriesProducer
+
 
 
 /**
@@ -70,22 +70,21 @@ object GatewayServer extends StrictLogging {
   val numContainersSent = Kamon.counter("num-containers-sent").withoutTags
   val containersSize = Kamon.histogram("containers-size-bytes").withoutTags
 
+
   // Most options are for generating test data
   class GatewayOptions(args: Seq[String]) extends ScallopConf(args) {
-    val samplesPerSeries = opt[Int](short = 'n', default = Some(100),
-                                    descr = "# of samples per time series")
-    val numSeries = opt[Int](short = 'p', default = Some(20), descr = "# of total time series")
+
+
     val sourceConfigPath = trailArg[String](descr = "Path to source config, eg conf/timeseries-dev-source.conf")
-    val genHistData = toggle(noshort = true, descrYes = "Generate histogram-schema test data and exit")
-    val genPromData = toggle(noshort = true, descrYes = "Generate Prometheus-schema test data and exit")
     verify()
+
   }
 
   //scalastyle:off method.length
   def main(args: Array[String]): Unit = {
     val userOpts = new GatewayOptions(args)
-    val numSamples = userOpts.samplesPerSeries() * userOpts.numSeries()
-    val numSeries = userOpts.numSeries()
+
+
 
     val sourceConfig = ConfigFactory.parseFile(new java.io.File(userOpts.sourceConfigPath()))
     val numShards = sourceConfig.getInt("num-shards")
@@ -119,38 +118,45 @@ object GatewayServer extends StrictLogging {
       }
     }
 
-    // TODO: allow configurable sinks, maybe multiple sinks for say writing to multiple Kafka clusters/DCs
-    setupKafkaProducer(sourceConfig, containerStream)
 
-    val genHist = userOpts.genHistData.getOrElse(false)
-    val genProm = userOpts.genPromData.getOrElse(false)
-    if (genHist || genProm) {
-      val startTime = System.currentTimeMillis
-      logger.info(s"Generating $numSamples samples starting at $startTime....")
 
-      val stream = if (genHist) TestTimeseriesProducer.genHistogramData(startTime, numSeries)
-                   else         TestTimeseriesProducer.timeSeriesData(startTime, numSeries)
 
-      stream.take(numSamples).foreach { rec =>
-        val shard = shardMapper.ingestionShard(rec.shardKeyHash, rec.partitionKeyHash, spread)
-        if (!shardQueues(shard).offer(rec)) {
-          // Prioritize recent data.  This means dropping messages when full, so new data may have a chance.
-          logger.warn(s"Queue for shard=$shard is full.  Dropping data.")
-          numDroppedMessages.increment()
-        }
+
+    val  condition = sourceConfig.getString("sourceconfig.filo-topic-name")
+    /*
+    // TODO to make a patter matching for more topics
+    condition match {
+      case x if x == "timeseries-dev" => {
+        /* 8006 kamon*/
+        // TODO: allow configurable sinks, maybe multiple sinks for say writing to multiple Kafka clusters/DCs
+        setupTCPServiceUno(config, calcShardAndQueueHandler)
+        setupKafkaProducer(sourceConfig, containerStream)
       }
-      Thread sleep 10000
-      TestTimeseriesProducer.logQueryHelp(numSamples, numSeries, startTime)
-      logger.info(s"Waited for containers to be sent, exiting...")
-      sys.exit(0)
+      case x if x == "timeseries-dev-demo" => {
+        /* 8007 cpu*/
+        // TODO: allow configurable sinks, maybe multiple sinks for say writing to multiple Kafka clusters/DCs
+        setupTCPServiceDos(config, calcShardAndQueueHandler)
+        setupKafkaProducer(sourceConfig, containerStream)
+      }
+      case _ => logger.error("Topic not exits")
+    }*/
+    if (condition == "timeseries-dev") {
+      /* 8006 kamon*/
+      // TODO: allow configurable sinks, maybe multiple sinks for say writing to multiple Kafka clusters/DCs
+      setupTCPService(config, sourceConfig, calcShardAndQueueHandler)
+      setupKafkaProducer(sourceConfig, containerStream)
+
     } else {
-      setupTCPService(config, calcShardAndQueueHandler)
+      /* 8007 cpu*/
+      // TODO: allow configurable sinks, maybe multiple sinks for say writing to multiple Kafka clusters/DCs
+      setupTCPService(config, sourceConfig, calcShardAndQueueHandler)
+      setupKafkaProducer(sourceConfig, containerStream)
     }
   }
   //scalastyle:on method.length
+  def setupTCPService(config: Config, sourceConf: Config, handler: ChannelBuffer => Unit): Unit = {
+    val influxPort = sourceConf.getInt("gateway.influx-port")
 
-  def setupTCPService(config: Config, handler: ChannelBuffer => Unit): Unit = {
-    val influxPort = config.getInt("gateway.influx-port")
 
     // Configure SSL.
     val SSL = config.getBoolean("gateway.tcp.ssl-enabled")
@@ -163,9 +169,9 @@ object GatewayServer extends StrictLogging {
 
     // Configure the bootstrap.
     val bootstrap = new ServerBootstrap(
-                      new NioServerSocketChannelFactory(
-                        Executors.newCachedThreadPool(),
-                        Executors.newCachedThreadPool()))
+      new NioServerSocketChannelFactory(
+        Executors.newCachedThreadPool(),
+        Executors.newCachedThreadPool()))
 
     bootstrap.setPipelineFactory(new ChannelPipelineFactory() {
       def getPipeline(): ChannelPipeline = {
@@ -186,6 +192,7 @@ object GatewayServer extends StrictLogging {
     logger.info(s"Starting GatewayServer with TCP port for Influx data at $influxPort....")
     bootstrap.bind(new InetSocketAddress(influxPort))
   }
+
 
   // Returns (Array[Queue] for shards, containerObservable)
   def shardingPipeline(config: Config, numShards: Int, dataset: Dataset):
@@ -280,4 +287,5 @@ object GatewayServer extends StrictLogging {
         // TODO: restart stream in case of failure?
         .recover { case NonFatal(e) => logger.error("Error occurred while producing messages to Kafka", e) }
   }
+
 }
